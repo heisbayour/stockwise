@@ -1,9 +1,9 @@
 // =============================================================
-// STOCKWISE — Root Layout
+// STOCKWISE — Root Layout (with AuthProvider)
 // File: src/app/layout.tsx
 //
-// This wraps EVERY page in the app. Navbar + Footer live here once
-// instead of being repeated on every page.
+// Wraps EVERY page in the app. AuthProvider must wrap Navbar and
+// children so useSession() works anywhere in the component tree.
 // =============================================================
 
 import type { Metadata } from "next";
@@ -11,11 +11,10 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
+import AuthProvider from "@/components/layout/AuthProvider";
 
-// Google Font — loaded once, applied via CSS variable
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
-// SEO metadata — shows in browser tab + search engine results
 export const metadata: Metadata = {
   title: "Stockwise — Invest in Nigeria, The Right Way",
   description:
@@ -30,9 +29,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${inter.variable} font-sans antialiased text-gray-900`}>
-        <Navbar />
-        {children}
-        <Footer />
+        <AuthProvider>
+          <Navbar />
+          {children}
+          <Footer />
+        </AuthProvider>
       </body>
     </html>
   );
