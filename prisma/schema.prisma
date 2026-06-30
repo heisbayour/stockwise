@@ -1,0 +1,332 @@
+// =============================================================
+// STOCKWISE — Prisma Database Schema
+// This file defines EVERY table in the database.
+// Run `npx prisma migrate dev` after changes to apply them.
+// Run `npx prisma generate` to regenerate the Prisma client.
+// =============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // ✅ RECOMMENDATION: Use Neon.tech (free) instead of a self-hosted VPS.
+  // Set DATABASE_URL in your .env file like:
+  // DATABASE_URL="postgresql://user:pass@ep-xxx.neon.tech/stockwise?sslmode=require"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================
+// USER — core identity & authentication
+// =============================================================
+model User {
+  id            String    @id @default(cuid()) // unique ID, not sequential for security
+  email         String    @unique
+  phone         String?   @unique
+  passwordHash  String    // NEVER store plain text passwords — always bcrypt hash
+
+  // Profile info
+  firstName     String?
+  lastName      String?
+  nin           String?   // Nigerian ID number — stored, NOT verified live in MVP
+  address       String?
+
+  // Verification status (each step is tracked separately)
+  emailVerified Boolean   @default(false)
+  phoneVerified Boolean   @default(false)
+  ninSubmitted  Boolean   @default(false) // they submitted it, admin reviews manually in MVP
+  isOnboarded   Boolean   @default(false) // completed full onboarding flow
+
+  // Role — most users are regular, admins can manage content
+  role          Role      @default(USER)
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations — one user has many of these
+  otpTokens         OtpToken[]
+  reviews           Review[]
+  savedBrokers      SavedBroker[]
+  watchlist         Watchlist[]
+  learningProgress  LearningProgress[]
+  scamReports       ScamReport[]
+  notifications     Notification[]
+
+  @@map("users") // table name in postgres
+}
+
+// Roles — extensible for future admin dashboard
+enum Role {
+  USER
+  ADMIN
+}
+
+// =============================================================
+// OTP TOKEN — for email/phone verification
+// Short-lived codes sent to users to verify identity
+// =============================================================
+model OtpToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  code      String    // the 6-digit code e.g. "482910"
+  type      OtpType   // what it's verifying
+  expiresAt DateTime  // tokens expire — never keep them forever
+  used      Boolean   @default(false) // mark as used once consumed
+
+  createdAt DateTime  @default(now())
+
+  @@map("otp_tokens")
+}
+
+enum OtpType {
+  EMAIL_VERIFICATION
+  PHONE_VERIFICATION
+  PASSWORD_RESET
+}
+
+// =============================================================
+// BROKER — the core data product of Stockwise
+// Populated by Martins' research. Admin-managed, not user-created.
+// =============================================================
+model Broker {
+  id                String       @id @default(cuid())
+  slug              String       @unique // URL-friendly: "meristem-securities"
+
+  // Core identity
+  name              String
+  type              BrokerType   // TRADITIONAL or DIGITAL
+  logoUrl           String?
+  website           String       // official website — where we redirect users to sign up
+  description       String       // 2-3 paragraph overview
+
+  // Regulatory info — Martins verifies this
+  secLicensed       Boolean      @default(false)   // SEC = Securities & Exchange Commission Nigeria
+  secLicenseNumber  String?
+  yearsOperating    Int?         // how long they've been in business
+
+  // Financial details
+  minimumDeposit    Float?       // in Naira
+  tradingFeePercent Float?       // e.g. 1.35 means 1.35%
+  accountOpeningFee Float?       // some charge upfront
+
+  // What they offer — stored as arrays for easy filtering
+  supportedAssets   String[]     // ["NGX Stocks", "US Stocks", "ETFs", "Bonds"]
+  accountTypes      String[]     // ["Individual", "Joint", "Corporate"]
+  features          String[]     // ["Mobile App", "Research Reports", "Portfolio Tracking"]
+
+  // Contact info
+  email             String?
+  phone             String?
+  address           String?
+
+  // Computed trust score — updated by cron job or admin
+  // Based on: secLicensed + yearsOperating + avgRating + reviews count
+  trustScore        Float?       @default(0) // 0–100
+
+  // Admin controls
+  isActive          Boolean      @default(true)  // hide without deleting
+  isVerified        Boolean      @default(false) // Stockwise has manually checked this broker
+  isFeatured        Boolean      @default(false) // show on homepage
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  // Relations
+  reviews           Review[]
+  savedBy           SavedBroker[]
+  openingRequirements BrokerRequirement[]
+
+  @@map("brokers")
+}
+
+enum BrokerType {
+  TRADITIONAL  // e.g. Meristem, ARM — older, established
+  DIGITAL      // e.g. Chaka, Bamboo — app-first, newer
+}
+
+// =============================================================
+// BROKER REQUIREMENT — documents needed to open an account
+// Each broker has different requirements (NIN, BVN, passport etc.)
+// Stored separately so it's easy to render a checklist per broker
+// =============================================================
+model BrokerRequirement {
+  id          String   @id @default(cuid())
+  brokerId    String
+  broker      Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+
+  item        String   // e.g. "Valid National ID (NIN)"
+  isRequired  Boolean  @default(true) // some are optional
+  note        String?  // extra context e.g. "Must be less than 6 months old"
+
+  @@map("broker_requirements")
+}
+
+// =============================================================
+// REVIEW — users rate brokers
+// =============================================================
+model Review {
+  id        String   @id @default(cuid())
+  userId    String
+  brokerId  String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broker    Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+
+  rating    Int      // 1–5 stars
+  title     String?
+  body      String?
+  isVerified Boolean @default(false) // admin-verified real customer
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One review per user per broker
+  @@unique([userId, brokerId])
+  @@map("reviews")
+}
+
+// =============================================================
+// SAVED BROKER — user's saved/bookmarked brokers
+// Like a favourites list
+// =============================================================
+model SavedBroker {
+  id        String   @id @default(cuid())
+  userId    String
+  brokerId  String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broker    Broker   @relation(fields: [brokerId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, brokerId]) // can't save the same broker twice
+  @@map("saved_brokers")
+}
+
+// =============================================================
+// WATCHLIST — stocks a user is tracking
+// NOTE: We don't store live prices — just the stock ticker symbol.
+// Live NGX price data requires a paid API; MVP uses static/seeded data.
+// =============================================================
+model Watchlist {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ticker      String   // e.g. "DANGCEM", "GTCO", "MTNN"
+  companyName String
+  addedAt     DateTime @default(now())
+
+  @@unique([userId, ticker])
+  @@map("watchlist")
+}
+
+// =============================================================
+// ARTICLE — Jennifer's educational content (the 10-lesson path)
+// Also used for blog posts, guides, FAQs
+// =============================================================
+model Article {
+  id          String      @id @default(cuid())
+  slug        String      @unique  // e.g. "what-is-investing"
+
+  title       String
+  excerpt     String      // 1–2 sentence summary shown on cards
+  content     String      // full article in Markdown format
+  coverImage  String?
+
+  category    ArticleCategory
+  lessonNumber Int?        // 1–10 for the roadmap lessons, null for blog posts
+  readingTime Int?         // estimated minutes to read
+
+  // SEO & visibility
+  isPublished Boolean      @default(false)
+  publishedAt DateTime?
+
+  // Metadata
+  authorName  String       @default("Stockwise Team")
+  tags        String[]     // ["beginner", "stocks", "NGX"]
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Relations
+  progress    LearningProgress[]
+
+  @@map("articles")
+}
+
+enum ArticleCategory {
+  LESSON       // part of the 10-lesson roadmap
+  GUIDE        // standalone how-to guides
+  NEWS         // market news (manually posted by admin in MVP)
+  FAQ          // frequently asked questions
+}
+
+// =============================================================
+// LEARNING PROGRESS — tracks which lessons a user has completed
+// =============================================================
+model LearningProgress {
+  id          String   @id @default(cuid())
+  userId      String
+  articleId   String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  article     Article  @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  completed   Boolean  @default(false)
+  completedAt DateTime?
+  lastRead    DateTime @default(now())
+
+  @@unique([userId, articleId])
+  @@map("learning_progress")
+}
+
+// =============================================================
+// SCAM REPORT — users can flag suspicious brokers/platforms
+// Admin reviews before publishing
+// =============================================================
+model ScamReport {
+  id            String       @id @default(cuid())
+  userId        String?      // optional — allow anonymous reports
+  user          User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  platformName  String       // name of the suspicious platform
+  platformUrl   String?
+  description   String       // what happened
+  evidenceUrls  String[]     // links to screenshots, social posts etc.
+
+  status        ReportStatus @default(PENDING)
+  adminNote     String?      // internal note after review
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@map("scam_reports")
+}
+
+enum ReportStatus {
+  PENDING    // just submitted, under review
+  VERIFIED   // confirmed scam, published as warning
+  REJECTED   // not enough evidence
+  RESOLVED   // platform addressed the issue
+}
+
+// =============================================================
+// NOTIFICATION — in-app notifications for users
+// e.g. "Your review was approved", "New lesson available"
+// =============================================================
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title     String
+  message   String
+  link      String?  // optional CTA link
+  isRead    Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@map("notifications")
+}
